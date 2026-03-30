@@ -1,13 +1,20 @@
 <script setup lang="ts">
+import { useAppStore } from '@/stores/app'
+import FileDropZone from '@/components/FileDropZone.vue'
+import AppHeader from '@/components/AppHeader.vue'
+import TopologyCanvas from '@/components/TopologyCanvas.vue'
+
+const appStore = useAppStore()
 </script>
 
 <template>
   <div class="flex h-screen w-screen flex-col bg-bg-primary">
-    <div class="flex flex-1 items-center justify-center">
-      <div class="text-center">
-        <h1 class="mb-2 text-2xl font-bold text-accent">taploot</h1>
-        <p class="text-text-secondary">drop a pcap file here to get started</p>
+    <template v-if="appStore.loadedFile">
+      <AppHeader />
+      <div class="flex flex-1 overflow-hidden">
+        <TopologyCanvas />
       </div>
-    </div>
+    </template>
+    <FileDropZone v-else />
   </div>
 </template>
