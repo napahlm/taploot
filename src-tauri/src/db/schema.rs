@@ -1,13 +1,19 @@
+use std::path::PathBuf;
+
 use rusqlite::Connection;
 
 use crate::TaplootError;
 
-pub fn init_db() -> Result<Connection, TaplootError> {
-    let conn = Connection::open_in_memory()?;
+pub fn init_db() -> Result<(Connection, PathBuf), TaplootError> {
+    let db_path = std::env::temp_dir().join(format!("taploot-{}.db", uuid::Uuid::new_v4()));
+    let conn = Connection::open(&db_path)?;
 
+    conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+    conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
     conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
     conn.execute_batch("PRAGMA cache_size=-64000;")?; // 64MB cache
     conn.execute_batch("PRAGMA temp_store=MEMORY;")?;
+    conn.execute_batch("PRAGMA mmap_size=268435456;")?; // 256MB mmap
 
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS hosts (
@@ -52,7 +58,13 @@ pub fn init_db() -> Result<Connection, TaplootError> {
         );",
     )?;
 
-    Ok(conn)
+    Ok((conn, db_path))
+}
+
+pub fn cleanup_db(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(path.with_extension("db-wal"));
+    let _ = std::fs::remove_file(path.with_extension("db-shm"));
 }
 
 pub fn clear_data(conn: &Connection) -> Result<(), TaplootError> {

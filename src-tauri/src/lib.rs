@@ -5,12 +5,33 @@ mod oui;
 mod parser;
 mod protocols;
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 pub use error::TaplootError;
 
+pub struct DbHandle {
+    pub conn: Arc<Mutex<rusqlite::Connection>>,
+    pub path: PathBuf,
+}
+
+impl Drop for DbHandle {
+    fn drop(&mut self) {
+        db::schema::cleanup_db(&self.path);
+    }
+}
+
 pub struct AppState {
-    pub db: Mutex<Option<Arc<Mutex<rusqlite::Connection>>>>,
+    pub db: Mutex<Option<DbHandle>>,
+}
+
+impl AppState {
+    pub fn get_conn(&self) -> Result<Arc<Mutex<rusqlite::Connection>>, TaplootError> {
+        let lock = self.db.lock().map_err(|e| TaplootError::Parse(e.to_string()))?;
+        lock.as_ref()
+            .map(|h| Arc::clone(&h.conn))
+            .ok_or_else(|| TaplootError::Parse("no database loaded".into()))
+    }
 }
 
 pub fn run() {

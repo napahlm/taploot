@@ -8,7 +8,7 @@ import { useTauri } from '@/composables/useTauri'
 const appStore = useAppStore()
 const topologyStore = useTopologyStore()
 const timelineStore = useTimelineStore()
-const { importPcap, getHosts, getConnections, getTimeRange } = useTauri()
+const { loadFile } = useTauri()
 
 function fileName(path: string): string {
   const sep = path.includes('\\') ? '\\' : '/'
@@ -21,22 +21,7 @@ async function openFile() {
     filters: [{ name: 'PCAP files', extensions: ['pcap', 'pcapng', 'cap'] }],
   })
   if (!selected) return
-  appStore.setLoading(true)
-  try {
-    await importPcap(selected)
-    const [hosts, connections, timeRange] = await Promise.all([
-      getHosts(),
-      getConnections(),
-      getTimeRange(),
-    ])
-    timelineStore.setFullRange(timeRange[0], timeRange[1])
-    topologyStore.buildGraph(hosts, connections)
-    appStore.setLoadedFile(selected)
-  } catch (e) {
-    appStore.setError(e instanceof Error ? e.message : String(e))
-  } finally {
-    appStore.setLoading(false)
-  }
+  await loadFile(selected)
 }
 
 function closeInvestigation() {
@@ -65,8 +50,13 @@ function closeInvestigation() {
         </button>
       </div>
     </div>
-    <span v-if="appStore.loadedFile" class="text-xs text-text-secondary">
-      {{ fileName(appStore.loadedFile) }}
-    </span>
+    <div class="flex items-center gap-3">
+      <span v-if="appStore.loading" class="text-xs text-accent-dim">
+        importing... {{ Math.round(appStore.importProgress * 100) }}%
+      </span>
+      <span v-if="appStore.loadedFile" class="text-xs text-text-secondary">
+        {{ fileName(appStore.loadedFile) }}
+      </span>
+    </div>
   </header>
 </template>

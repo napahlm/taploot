@@ -68,13 +68,7 @@ pub struct Packet {
 fn get_db(
     state: &State<'_, AppState>,
 ) -> Result<std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>, TaplootError> {
-    let db_lock = state
-        .db
-        .lock()
-        .map_err(|e| TaplootError::Parse(e.to_string()))?;
-    db_lock
-        .clone()
-        .ok_or_else(|| TaplootError::Parse("no pcap loaded".into()))
+    state.get_conn()
 }
 
 #[allow(clippy::needless_pass_by_value)]

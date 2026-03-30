@@ -1,5 +1,9 @@
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import type { Host, Connection, ImportResult, HostDetail, Packet } from '@/types/network'
+import { useAppStore } from '@/stores/app'
+import { useTopologyStore } from '@/stores/topology'
+import { useTimelineStore } from '@/stores/timeline'
 
 export function useTauri() {
   async function importPcap(path: string): Promise<ImportResult> {
@@ -30,6 +34,38 @@ export function useTauri() {
     return invoke<Packet[]>('get_connection_packets', { connectionId, limit })
   }
 
+  async function loadFile(path: string) {
+    const appStore = useAppStore()
+    const topologyStore = useTopologyStore()
+    const timelineStore = useTimelineStore()
+
+    appStore.setLoading(true)
+    const unlisten = await listen<{ bytes_done: number; bytes_total: number }>(
+      'import-progress',
+      (event) => {
+        if (event.payload.bytes_total > 0) {
+          appStore.importProgress = event.payload.bytes_done / event.payload.bytes_total
+        }
+      },
+    )
+    try {
+      await importPcap(path)
+      const [hosts, connections, timeRange] = await Promise.all([
+        getHosts(),
+        getConnections(),
+        getTimeRange(),
+      ])
+      timelineStore.setFullRange(timeRange[0], timeRange[1])
+      topologyStore.buildGraph(hosts, connections)
+      appStore.setLoadedFile(path)
+    } catch (e) {
+      appStore.setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      unlisten()
+      appStore.setLoading(false)
+    }
+  }
+
   return {
     importPcap,
     getHosts,
@@ -38,5 +74,6 @@ export function useTauri() {
     saveNodePosition,
     getHostDetail,
     getConnectionPackets,
+    loadFile,
   }
 }

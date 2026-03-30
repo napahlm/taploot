@@ -1,37 +1,15 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { open } from '@tauri-apps/plugin-dialog'
 import { useTauri } from '@/composables/useTauri'
 import { useAppStore } from '@/stores/app'
-import { useTopologyStore } from '@/stores/topology'
-import { useTimelineStore } from '@/stores/timeline'
 
 const appStore = useAppStore()
-const topologyStore = useTopologyStore()
-const timelineStore = useTimelineStore()
-const { importPcap, getHosts, getConnections, getTimeRange } = useTauri()
+const { loadFile } = useTauri()
 
 const hovering = ref(false)
-
-async function loadFile(path: string) {
-  appStore.setLoading(true)
-  try {
-    await importPcap(path)
-    const [hosts, connections, timeRange] = await Promise.all([
-      getHosts(),
-      getConnections(),
-      getTimeRange(),
-    ])
-    timelineStore.setFullRange(timeRange[0], timeRange[1])
-    topologyStore.buildGraph(hosts, connections)
-    appStore.setLoadedFile(path)
-  } catch (e) {
-    appStore.setError(e instanceof Error ? e.message : String(e))
-  } finally {
-    appStore.setLoading(false)
-  }
-}
+const progressPct = computed(() => Math.round(appStore.importProgress * 100))
 
 async function openFilePicker() {
   const selected = await open({
@@ -100,12 +78,15 @@ onUnmounted(() => {
         browse files
       </button>
 
-      <p v-if="appStore.loading" class="flex flex-col items-center gap-2 text-sm text-accent-dim">
-        <span>importing...</span>
+      <div v-if="appStore.loading" class="flex flex-col items-center gap-2 text-sm text-accent-dim">
+        <span>importing... {{ progressPct }}%</span>
         <span class="h-1 w-48 overflow-hidden rounded-full bg-bg-elevated">
-          <span class="block h-full animate-pulse rounded-full bg-accent" style="width: 100%"></span>
+          <span
+            class="block h-full rounded-full bg-accent transition-all duration-150"
+            :style="{ width: progressPct + '%' }"
+          ></span>
         </span>
-      </p>
+      </div>
       <p v-if="appStore.error" class="max-w-xs text-center text-sm text-red-400">
         {{ appStore.error }}
       </p>

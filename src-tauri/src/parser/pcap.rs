@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pcap_parser::traits::PcapReaderIterator;
@@ -17,6 +18,7 @@ use crate::TaplootError;
 pub fn parse_pcap(
     path: &Path,
     db: &Arc<Mutex<rusqlite::Connection>>,
+    progress: &AtomicU64,
 ) -> Result<ImportResult, TaplootError> {
     let mut file = File::open(path)?;
     let mut buf = Vec::new();
@@ -48,12 +50,12 @@ pub fn parse_pcap(
     let result = if is_pcapng {
         parse_pcapng_data(
             &buf, &conn, &mut host_map, &mut conn_map,
-            &mut packet_count, &mut min_ts, &mut max_ts,
+            &mut packet_count, &mut min_ts, &mut max_ts, progress,
         )
     } else {
         parse_legacy_data(
             &buf, &conn, &mut host_map, &mut conn_map,
-            &mut packet_count, &mut min_ts, &mut max_ts,
+            &mut packet_count, &mut min_ts, &mut max_ts, progress,
         )
     };
 
@@ -89,6 +91,7 @@ fn parse_pcapng_data(
     packet_count: &mut usize,
     min_ts: &mut f64,
     max_ts: &mut f64,
+    progress: &AtomicU64,
 ) -> Result<(), TaplootError> {
     let mut reader = PcapNGReader::new(65536, std::io::Cursor::new(data))
         .map_err(|e| TaplootError::Parse(format!("pcapng reader: {e}")))?;
@@ -124,6 +127,7 @@ fn parse_pcapng_data(
                     _ => {}
                 }
                 reader.consume(offset);
+                progress.fetch_add(offset as u64, Ordering::Relaxed);
             }
             Err(PcapError::Eof) => break,
             Err(PcapError::Incomplete(_)) => {
@@ -146,6 +150,7 @@ fn parse_legacy_data(
     packet_count: &mut usize,
     min_ts: &mut f64,
     max_ts: &mut f64,
+    progress: &AtomicU64,
 ) -> Result<(), TaplootError> {
     let mut reader = LegacyPcapReader::new(65536, std::io::Cursor::new(data))
         .map_err(|e| TaplootError::Parse(format!("pcap reader: {e}")))?;
@@ -161,6 +166,7 @@ fn parse_legacy_data(
                     )?;
                 }
                 reader.consume(offset);
+                progress.fetch_add(offset as u64, Ordering::Relaxed);
             }
             Err(PcapError::Eof) => break,
             Err(PcapError::Incomplete(_)) => {
