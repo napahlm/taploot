@@ -27,5 +27,11 @@ export const useTimelineStore = defineStore('timeline', () => {
     filtering.value = false
   }
 
-  return { fullRange, filterRange, filtering, setFullRange, setFilterRange, resetFilter }
+  function reset() {
+    fullRange.value = { start: 0, end: 0 }
+    filterRange.value = { start: 0, end: 0 }
+    filtering.value = false
+  }
+
+  return { fullRange, filterRange, filtering, setFullRange, setFilterRange, resetFilter, reset }
 })

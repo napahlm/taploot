@@ -6,12 +6,27 @@ use std::sync::{Arc, Mutex};
 
 use pcap_parser::traits::PcapReaderIterator;
 use pcap_parser::*;
+use rusqlite::params;
 
 use crate::commands::import::ImportResult;
-use crate::db::queries;
+use crate::db::{queries, schema};
 use crate::oui;
 use crate::protocols::modbus;
 use crate::TaplootError;
+
+/// Buffered packet row for batch insert
+struct PacketRow {
+    connection_id: i64,
+    timestamp: f64,
+    src_ip: String,
+    dst_ip: String,
+    src_port: u16,
+    dst_port: u16,
+    protocol: String,
+    length: i64,
+}
+
+const PACKET_BATCH_SIZE: usize = 5000;
 
 pub fn parse_pcap(
     path: &Path,
@@ -23,42 +38,54 @@ pub fn parse_pcap(
 
     let conn = db.lock().map_err(|e| TaplootError::Parse(e.to_string()))?;
 
-    // track hosts and connections we've seen
+    // Clear stale data and drop indexes for fast bulk insert
+    schema::clear_data(&conn)?;
+    schema::drop_packet_indexes(&conn)?;
+
+    // Single transaction for the entire import
+    conn.execute_batch("BEGIN EXCLUSIVE")?;
+
     let mut host_map: HashMap<String, i64> = HashMap::new();
     let mut conn_map: HashMap<String, i64> = HashMap::new();
+    let mut packet_buf: Vec<PacketRow> = Vec::with_capacity(PACKET_BATCH_SIZE);
     let mut packet_count: usize = 0;
     let mut min_ts: f64 = f64::MAX;
     let mut max_ts: f64 = f64::MIN;
 
-    // detect format by first 4 bytes
     if buf.len() < 4 {
+        conn.execute_batch("ROLLBACK")?;
         return Err(TaplootError::Parse("file too small".into()));
     }
 
     let magic = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
     let is_pcapng = magic == 0x0A0D_0D0A;
 
-    if is_pcapng {
+    let result = if is_pcapng {
         parse_pcapng_data(
-            &buf,
-            &conn,
-            &mut host_map,
-            &mut conn_map,
-            &mut packet_count,
-            &mut min_ts,
-            &mut max_ts,
-        )?;
+            &buf, &conn, &mut host_map, &mut conn_map,
+            &mut packet_buf, &mut packet_count, &mut min_ts, &mut max_ts,
+        )
     } else {
         parse_legacy_data(
-            &buf,
-            &conn,
-            &mut host_map,
-            &mut conn_map,
-            &mut packet_count,
-            &mut min_ts,
-            &mut max_ts,
-        )?;
+            &buf, &conn, &mut host_map, &mut conn_map,
+            &mut packet_buf, &mut packet_count, &mut min_ts, &mut max_ts,
+        )
+    };
+
+    if let Err(e) = result {
+        let _ = conn.execute_batch("ROLLBACK");
+        return Err(e);
     }
+
+    // Flush remaining buffered packets
+    if !packet_buf.is_empty() {
+        flush_packets(&conn, &packet_buf)?;
+    }
+
+    // Recreate indexes after all data is inserted
+    schema::create_packet_indexes(&conn)?;
+
+    conn.execute_batch("COMMIT")?;
 
     if packet_count == 0 {
         min_ts = 0.0;
@@ -73,11 +100,46 @@ pub fn parse_pcap(
     })
 }
 
+/// Batch-insert buffered packets using a multi-value INSERT
+fn flush_packets(conn: &rusqlite::Connection, rows: &[PacketRow]) -> Result<(), TaplootError> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    // Build multi-value INSERT: INSERT INTO packets (...) VALUES (?,?,?,...), (?,?,?,...),...
+    let mut sql = String::from(
+        "INSERT INTO packets (connection_id, timestamp, src_ip, dst_ip, src_port, dst_port, protocol, length) VALUES ",
+    );
+    for (i, _) in rows.iter().enumerate() {
+        if i > 0 {
+            sql.push(',');
+        }
+        sql.push_str("(?,?,?,?,?,?,?,?)");
+    }
+
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let mut idx = 1;
+    for row in rows {
+        stmt.raw_bind_parameter(idx, row.connection_id)?;
+        stmt.raw_bind_parameter(idx + 1, row.timestamp)?;
+        stmt.raw_bind_parameter(idx + 2, &row.src_ip)?;
+        stmt.raw_bind_parameter(idx + 3, &row.dst_ip)?;
+        stmt.raw_bind_parameter(idx + 4, i64::from(row.src_port))?;
+        stmt.raw_bind_parameter(idx + 5, i64::from(row.dst_port))?;
+        stmt.raw_bind_parameter(idx + 6, &row.protocol)?;
+        stmt.raw_bind_parameter(idx + 7, row.length)?;
+        idx += 8;
+    }
+    stmt.raw_execute()?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn parse_pcapng_data(
     data: &[u8],
     conn: &rusqlite::Connection,
     host_map: &mut HashMap<String, i64>,
     conn_map: &mut HashMap<String, i64>,
+    packet_buf: &mut Vec<PacketRow>,
     packet_count: &mut usize,
     min_ts: &mut f64,
     max_ts: &mut f64,
@@ -85,8 +147,7 @@ fn parse_pcapng_data(
     let mut reader = PcapNGReader::new(65536, std::io::Cursor::new(data))
         .map_err(|e| TaplootError::Parse(format!("pcapng reader: {e}")))?;
 
-    // track per-interface timestamp resolution and offset
-    let mut if_info: Vec<(u64, u64)> = Vec::new(); // (ts_offset, resolution)
+    let mut if_info: Vec<(u64, u64)> = Vec::new();
 
     loop {
         match reader.next() {
@@ -104,26 +165,14 @@ fn parse_pcapng_data(
                             .unwrap_or((0, 1_000_000));
                         let ts = epb.decode_ts_f64(ts_offset, resolution);
                         process_packet(
-                            epb.data,
-                            ts,
-                            conn,
-                            host_map,
-                            conn_map,
-                            packet_count,
-                            min_ts,
-                            max_ts,
+                            epb.data, ts, conn, host_map, conn_map,
+                            packet_buf, packet_count, min_ts, max_ts,
                         )?;
                     }
                     PcapBlockOwned::NG(Block::SimplePacket(spb)) => {
                         process_packet(
-                            spb.data,
-                            0.0,
-                            conn,
-                            host_map,
-                            conn_map,
-                            packet_count,
-                            min_ts,
-                            max_ts,
+                            spb.data, 0.0, conn, host_map, conn_map,
+                            packet_buf, packet_count, min_ts, max_ts,
                         )?;
                     }
                     _ => {}
@@ -142,11 +191,13 @@ fn parse_pcapng_data(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_legacy_data(
     data: &[u8],
     conn: &rusqlite::Connection,
     host_map: &mut HashMap<String, i64>,
     conn_map: &mut HashMap<String, i64>,
+    packet_buf: &mut Vec<PacketRow>,
     packet_count: &mut usize,
     min_ts: &mut f64,
     max_ts: &mut f64,
@@ -160,14 +211,8 @@ fn parse_legacy_data(
                 if let PcapBlockOwned::Legacy(packet) = block {
                     let ts = f64::from(packet.ts_sec) + f64::from(packet.ts_usec) / 1_000_000.0;
                     process_packet(
-                        packet.data,
-                        ts,
-                        conn,
-                        host_map,
-                        conn_map,
-                        packet_count,
-                        min_ts,
-                        max_ts,
+                        packet.data, ts, conn, host_map, conn_map,
+                        packet_buf, packet_count, min_ts, max_ts,
                     )?;
                 }
                 reader.consume(offset);
@@ -191,22 +236,21 @@ fn process_packet(
     conn: &rusqlite::Connection,
     host_map: &mut HashMap<String, i64>,
     conn_map: &mut HashMap<String, i64>,
+    packet_buf: &mut Vec<PacketRow>,
     packet_count: &mut usize,
     min_ts: &mut f64,
     max_ts: &mut f64,
 ) -> Result<(), TaplootError> {
     let Ok(parsed) = etherparse::SlicedPacket::from_ethernet(data) else {
-        return Ok(()); // skip unparseable packets
+        return Ok(());
     };
 
-    // extract MAC addresses from ethernet header
     let (src_mac, dst_mac) = if data.len() >= 14 {
         (format_mac(&data[6..12]), format_mac(&data[0..6]))
     } else {
         return Ok(());
     };
 
-    // extract IP addresses
     let (src_ip, dst_ip) = match &parsed.net {
         Some(etherparse::NetSlice::Ipv4(ipv4)) => {
             let h = ipv4.header();
@@ -215,10 +259,9 @@ fn process_packet(
                 format!("{}", h.destination_addr()),
             )
         }
-        _ => return Ok(()), // skip non-IPv4 for now
+        _ => return Ok(()),
     };
 
-    // extract transport layer info
     let (src_port, dst_port, protocol, payload): (u16, u16, &str, &[u8]) = match &parsed.transport {
         Some(etherparse::TransportSlice::Tcp(tcp)) => (
             tcp.source_port(),
@@ -236,14 +279,12 @@ fn process_packet(
         _ => return Ok(()),
     };
 
-    // check for Modbus TCP
     let app_protocol = if protocol == "TCP" && modbus::is_modbus_tcp(src_port, dst_port, payload) {
         Some("modbus".to_string())
     } else {
         None
     };
 
-    // update timestamps
     if timestamp > 0.0 {
         if timestamp < *min_ts {
             *min_ts = timestamp;
@@ -253,37 +294,57 @@ fn process_packet(
         }
     }
 
-    // upsert source host
+    // Upsert hosts — in-memory cache avoids repeated DB calls
     let src_host_id = upsert_host(conn, host_map, &src_ip, &src_mac, timestamp)?;
     let dst_host_id = upsert_host(conn, host_map, &dst_ip, &dst_mac, timestamp)?;
 
-    // upsert connection
+    // Upsert connection — in-memory cache for the common case
     let flow_key = format!("{src_ip}:{src_port}-{dst_ip}:{dst_port}-{protocol}");
     let protocol = protocol.to_string();
     let conn_id = if let Some(&id) = conn_map.get(&flow_key) {
-        queries::update_connection(conn, id, timestamp, data.len() as i64)?;
+        conn.prepare_cached(
+            "UPDATE connections SET
+                packet_count = packet_count + 1,
+                byte_count = byte_count + ?1,
+                first_seen = MIN(first_seen, ?2),
+                last_seen = MAX(last_seen, ?2)
+             WHERE id = ?3",
+        )?
+        .execute(params![data.len() as i64, timestamp, id])?;
         id
     } else {
-        let id = queries::insert_connection(
-            conn,
-            src_host_id,
-            dst_host_id,
-            src_port,
-            dst_port,
-            &protocol,
-            app_protocol.as_deref(),
-            timestamp,
-            data.len() as i64,
-        )?;
+        conn.prepare_cached(
+            "INSERT INTO connections
+                (src_host_id, dst_host_id, src_port, dst_port, protocol, app_protocol,
+                 packet_count, byte_count, first_seen, last_seen)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8, ?8)",
+        )?
+        .execute(params![
+            src_host_id, dst_host_id, src_port, dst_port,
+            &protocol, app_protocol.as_deref(),
+            data.len() as i64, timestamp,
+        ])?;
+        let id = conn.last_insert_rowid();
         conn_map.insert(flow_key, id);
         id
     };
 
-    // insert packet summary
-    let len = data.len() as i64;
-    queries::insert_packet(
-        conn, conn_id, timestamp, &src_ip, &dst_ip, src_port, dst_port, &protocol, len,
-    )?;
+    // Buffer packet for batch insert
+    packet_buf.push(PacketRow {
+        connection_id: conn_id,
+        timestamp,
+        src_ip,
+        dst_ip,
+        src_port,
+        dst_port,
+        protocol,
+        length: data.len() as i64,
+    });
+
+    if packet_buf.len() >= PACKET_BATCH_SIZE {
+        flush_packets(conn, packet_buf)?;
+        packet_buf.clear();
+    }
 
     *packet_count += 1;
     Ok(())
@@ -297,12 +358,21 @@ fn upsert_host(
     timestamp: f64,
 ) -> Result<i64, TaplootError> {
     if let Some(&id) = host_map.get(ip) {
-        queries::update_host_timestamp(conn, id, timestamp)?;
+        conn.prepare_cached(
+            "UPDATE hosts SET
+                first_seen = MIN(first_seen, ?1),
+                last_seen = MAX(last_seen, ?1)
+             WHERE id = ?2",
+        )?
+        .execute(params![timestamp, id])?;
         return Ok(id);
     }
-    let id = queries::insert_host(conn, mac, ip, timestamp)?;
+    let id = queries::upsert_host_returning_id(conn, mac, ip, timestamp)?;
     if let Some(vendor) = oui::lookup_vendor(mac) {
-        queries::update_host_device_type(conn, id, vendor)?;
+        conn.prepare_cached(
+            "UPDATE hosts SET device_type = ?1 WHERE id = ?2 AND device_type = 'unknown'",
+        )?
+        .execute(params![vendor, id])?;
     }
     host_map.insert(ip.to_string(), id);
     Ok(id)

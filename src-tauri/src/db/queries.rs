@@ -3,7 +3,9 @@ use rusqlite::{params, Connection};
 use crate::commands::query::{Connection as NetConnection, Host, HostConnection, HostDetail, Packet};
 use crate::TaplootError;
 
-pub fn insert_host(
+// ── Bulk-import helper: upsert host and return correct id ────────────────────
+
+pub fn upsert_host_returning_id(
     conn: &Connection,
     mac: &str,
     ip: &str,
@@ -17,111 +19,13 @@ pub fn insert_host(
             mac_address = CASE WHEN mac_address = '' THEN ?1 ELSE mac_address END",
         params![mac, ip, timestamp],
     )?;
-    Ok(conn.last_insert_rowid())
-}
-
-pub fn update_host_timestamp(
-    conn: &Connection,
-    id: i64,
-    timestamp: f64,
-) -> Result<(), TaplootError> {
-    conn.execute(
-        "UPDATE hosts SET
-            first_seen = MIN(first_seen, ?1),
-            last_seen = MAX(last_seen, ?1)
-         WHERE id = ?2",
-        params![timestamp, id],
+    // last_insert_rowid() returns 0 on conflict-update, so always SELECT
+    let id: i64 = conn.query_row(
+        "SELECT id FROM hosts WHERE ip_address = ?1",
+        params![ip],
+        |row| row.get(0),
     )?;
-    Ok(())
-}
-
-pub fn update_host_device_type(
-    conn: &Connection,
-    id: i64,
-    device_type: &str,
-) -> Result<(), TaplootError> {
-    conn.execute(
-        "UPDATE hosts SET device_type = ?1 WHERE id = ?2 AND device_type = 'unknown'",
-        params![device_type, id],
-    )?;
-    Ok(())
-}
-
-pub fn insert_connection(
-    conn: &Connection,
-    src_host_id: i64,
-    dst_host_id: i64,
-    src_port: u16,
-    dst_port: u16,
-    protocol: &str,
-    app_protocol: Option<&str>,
-    timestamp: f64,
-    byte_count: i64,
-) -> Result<i64, TaplootError> {
-    conn.execute(
-        "INSERT INTO connections
-            (src_host_id, dst_host_id, src_port, dst_port, protocol, app_protocol,
-             packet_count, byte_count, first_seen, last_seen)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8, ?8)",
-        params![
-            src_host_id,
-            dst_host_id,
-            src_port,
-            dst_port,
-            protocol,
-            app_protocol,
-            byte_count,
-            timestamp,
-        ],
-    )?;
-    Ok(conn.last_insert_rowid())
-}
-
-pub fn update_connection(
-    conn: &Connection,
-    id: i64,
-    timestamp: f64,
-    bytes: i64,
-) -> Result<(), TaplootError> {
-    conn.execute(
-        "UPDATE connections SET
-            packet_count = packet_count + 1,
-            byte_count = byte_count + ?1,
-            first_seen = MIN(first_seen, ?2),
-            last_seen = MAX(last_seen, ?2)
-         WHERE id = ?3",
-        params![bytes, timestamp, id],
-    )?;
-    Ok(())
-}
-
-pub fn insert_packet(
-    conn: &Connection,
-    connection_id: i64,
-    timestamp: f64,
-    src_ip: &str,
-    dst_ip: &str,
-    src_port: u16,
-    dst_port: u16,
-    protocol: &str,
-    length: i64,
-) -> Result<(), TaplootError> {
-    conn.execute(
-        "INSERT INTO packets
-            (connection_id, timestamp, src_ip, dst_ip, src_port, dst_port, protocol, length)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![
-            connection_id,
-            timestamp,
-            src_ip,
-            dst_ip,
-            src_port,
-            dst_port,
-            protocol,
-            length
-        ],
-    )?;
-    Ok(())
+    Ok(id)
 }
 
 pub fn get_all_hosts(conn: &Connection) -> Result<Vec<Host>, TaplootError> {

@@ -100,7 +100,12 @@ onUnmounted(() => {
         browse files
       </button>
 
-      <p v-if="appStore.loading" class="text-sm text-accent-dim">importing...</p>
+      <p v-if="appStore.loading" class="flex flex-col items-center gap-2 text-sm text-accent-dim">
+        <span>importing...</span>
+        <span class="h-1 w-48 overflow-hidden rounded-full bg-bg-elevated">
+          <span class="block h-full animate-pulse rounded-full bg-accent" style="width: 100%"></span>
+        </span>
+      </p>
       <p v-if="appStore.error" class="max-w-xs text-center text-sm text-red-400">
         {{ appStore.error }}
       </p>

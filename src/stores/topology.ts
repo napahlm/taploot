@@ -1,4 +1,4 @@
-import { ref, computed } from 'vue'
+import { ref, computed, shallowRef, triggerRef } from 'vue'
 import { defineStore } from 'pinia'
 import {
   forceSimulation,
@@ -28,6 +28,8 @@ const DEFAULT_LAYOUT: LayoutConfig = {
   centerY: 400,
 }
 
+const CLUSTER_THRESHOLD = 200
+
 function edgeColor(conn: Connection): string {
   if (conn.app_protocol) return EDGE_COLORS[conn.app_protocol] ?? '#6b7280'
   return EDGE_COLORS[conn.protocol] ?? '#6b7280'
@@ -38,15 +40,25 @@ function edgeWidth(conn: Connection): number {
   return Math.max(1, Math.min(base, 6))
 }
 
+function getSubnet(ip: string): string {
+  const parts = ip.split('.')
+  return parts.length === 4 ? `${parts[0]}.${parts[1]}.${parts[2]}` : ip
+}
+
 export const useTopologyStore = defineStore('topology', () => {
-  const nodes = ref<CanvasNode[]>([])
-  const edges = ref<CanvasEdge[]>([])
+  const nodes = shallowRef<CanvasNode[]>([])
+  const edges = shallowRef<CanvasEdge[]>([])
   const selectedNodeId = ref<number | null>(null)
   const selectedEdgeId = ref<number | null>(null)
   const searchQuery = ref('')
   const layout = ref<LayoutConfig>({ ...DEFAULT_LAYOUT })
+  const expandedSubnets = ref(new Set<string>())
+  const clustered = ref(false)
+
   let simulation: Simulation<SimNode, undefined> | null = null
   let onTickCallback: (() => void) | null = null
+  let rawHosts: Host[] = []
+  let rawConnections: Connection[] = []
 
   const timelineStore = useTimelineStore()
 
@@ -80,7 +92,6 @@ export const useTopologyStore = defineStore('topology', () => {
         matched.add(h.id)
       }
     }
-    // Also match edges by protocol
     for (const edge of edges.value) {
       const c = edge.connection
       const proto = (c.app_protocol ?? c.protocol).toLowerCase()
@@ -93,6 +104,20 @@ export const useTopologyStore = defineStore('topology', () => {
   })
 
   function buildGraph(hosts: Host[], connections: Connection[]) {
+    rawHosts = hosts
+    rawConnections = connections
+    expandedSubnets.value.clear()
+
+    if (hosts.length > CLUSTER_THRESHOLD) {
+      clustered.value = true
+      rebuildClusteredGraph()
+    } else {
+      clustered.value = false
+      buildFlatGraph(hosts, connections)
+    }
+  }
+
+  function buildFlatGraph(hosts: Host[], connections: Connection[]) {
     const nodeMap = new Map<number, CanvasNode>()
 
     nodes.value = hosts.map((host) => {
@@ -124,6 +149,135 @@ export const useTopologyStore = defineStore('topology', () => {
     runSimulation()
   }
 
+  function rebuildClusteredGraph() {
+    const subnetMap = new Map<string, Host[]>()
+    for (const h of rawHosts) {
+      const s = getSubnet(h.ip_address)
+      let arr = subnetMap.get(s)
+      if (!arr) { arr = []; subnetMap.set(s, arr) }
+      arr.push(h)
+    }
+
+    const nodeMap = new Map<number, CanvasNode>()
+    const hostToNodeId = new Map<number, number>()
+    let nextClusterId = -1
+
+    for (const [subnet, hosts] of subnetMap) {
+      if (hosts.length <= 1 || expandedSubnets.value.has(subnet)) {
+        for (const host of hosts) {
+          const node: CanvasNode = {
+            host,
+            x: layout.value.centerX + (Math.random() - 0.5) * 200,
+            y: layout.value.centerY + (Math.random() - 0.5) * 200,
+            vx: 0, vy: 0,
+            radius: 18,
+            color: '#39ff14',
+            label: host.ip_address,
+            pinned: false,
+          }
+          nodeMap.set(host.id, node)
+          hostToNodeId.set(host.id, host.id)
+        }
+      } else {
+        const cId = nextClusterId--
+        const fakeHost: Host = {
+          id: cId,
+          mac_address: '',
+          ip_address: `${subnet}.0/24`,
+          device_type: 'subnet',
+          first_seen: Math.min(...hosts.map((h) => h.first_seen)),
+          last_seen: Math.max(...hosts.map((h) => h.last_seen)),
+        }
+        const node: CanvasNode = {
+          host: fakeHost,
+          x: layout.value.centerX + (Math.random() - 0.5) * 200,
+          y: layout.value.centerY + (Math.random() - 0.5) * 200,
+          vx: 0, vy: 0,
+          radius: Math.min(40, 18 + Math.sqrt(hosts.length) * 3),
+          color: '#6366f1',
+          label: `${subnet}.0/24 (${hosts.length})`,
+          pinned: false,
+          cluster: { subnet, hostCount: hosts.length, hostIds: hosts.map((h) => h.id) },
+        }
+        nodeMap.set(cId, node)
+        for (const h of hosts) hostToNodeId.set(h.id, cId)
+      }
+    }
+
+    nodes.value = Array.from(nodeMap.values())
+
+    // Build edges: keep originals between individual nodes, aggregate for clusters
+    const newEdges: CanvasEdge[] = []
+    const aggKey = (a: number, b: number) => `${Math.min(a, b)}-${Math.max(a, b)}`
+    const aggregated = new Map<string, { src: number; dst: number; packets: number; bytes: number; firstSeen: number; lastSeen: number; protocol: string; appProtocol: string | null }>()
+
+    for (const conn of rawConnections) {
+      const srcId = hostToNodeId.get(conn.src_host_id)
+      const dstId = hostToNodeId.get(conn.dst_host_id)
+      if (srcId === undefined || dstId === undefined || srcId === dstId) continue
+
+      if (srcId === conn.src_host_id && dstId === conn.dst_host_id) {
+        // Both endpoints are individual — keep original connection
+        newEdges.push({
+          connection: conn,
+          source: nodeMap.get(srcId)!,
+          target: nodeMap.get(dstId)!,
+          color: edgeColor(conn),
+          width: edgeWidth(conn),
+        })
+      } else {
+        // At least one endpoint is a cluster — aggregate
+        const key = aggKey(srcId, dstId)
+        const ex = aggregated.get(key)
+        if (ex) {
+          ex.packets += conn.packet_count
+          ex.bytes += conn.byte_count
+          ex.firstSeen = Math.min(ex.firstSeen, conn.first_seen)
+          ex.lastSeen = Math.max(ex.lastSeen, conn.last_seen)
+        } else {
+          aggregated.set(key, {
+            src: srcId, dst: dstId,
+            packets: conn.packet_count, bytes: conn.byte_count,
+            firstSeen: conn.first_seen, lastSeen: conn.last_seen,
+            protocol: conn.protocol, appProtocol: conn.app_protocol,
+          })
+        }
+      }
+    }
+
+    let syntheticId = -1
+    for (const agg of aggregated.values()) {
+      const synConn: Connection = {
+        id: syntheticId--,
+        src_host_id: agg.src, dst_host_id: agg.dst,
+        src_port: 0, dst_port: 0,
+        protocol: agg.protocol, app_protocol: agg.appProtocol,
+        packet_count: agg.packets, byte_count: agg.bytes,
+        first_seen: agg.firstSeen, last_seen: agg.lastSeen,
+      }
+      newEdges.push({
+        connection: synConn,
+        source: nodeMap.get(agg.src)!,
+        target: nodeMap.get(agg.dst)!,
+        color: edgeColor(synConn),
+        width: edgeWidth(synConn),
+      })
+    }
+
+    edges.value = newEdges
+    runSimulation()
+  }
+
+  function toggleCluster(subnet: string) {
+    const s = expandedSubnets.value
+    if (s.has(subnet)) {
+      s.delete(subnet)
+    } else {
+      s.add(subnet)
+    }
+    rebuildClusteredGraph()
+  }
+
   function runSimulation() {
     if (simulation) simulation.stop()
 
@@ -133,17 +287,21 @@ export const useTopologyStore = defineStore('topology', () => {
       target: simNodes.indexOf(e.target as SimNode),
     }))
 
+    const nodeCount = simNodes.length
+    const charge = nodeCount > 200 ? -150 : layout.value.chargeStrength
+    const alphaDecay = nodeCount > 200 ? 0.05 : 0.0228
+
     simulation = forceSimulation(simNodes)
       .force(
         'link',
         forceLink(simLinks).distance(layout.value.linkDistance),
       )
-      .force('charge', forceManyBody().strength(layout.value.chargeStrength))
+      .force('charge', forceManyBody().strength(charge))
       .force('center', forceCenter(layout.value.centerX, layout.value.centerY))
       .force('collide', forceCollide(24))
+      .alphaDecay(alphaDecay)
       .on('tick', () => {
-        // Trigger reactivity by shallow-replacing the array
-        nodes.value = [...nodes.value]
+        triggerRef(nodes)
         onTickCallback?.()
       })
   }
@@ -194,6 +352,11 @@ export const useTopologyStore = defineStore('topology', () => {
     edges.value = []
     selectedNodeId.value = null
     selectedEdgeId.value = null
+    searchQuery.value = ''
+    expandedSubnets.value.clear()
+    clustered.value = false
+    rawHosts = []
+    rawConnections = []
     onTickCallback = null
   }
 
@@ -213,6 +376,7 @@ export const useTopologyStore = defineStore('topology', () => {
     selectedEdgeId,
     searchQuery,
     layout,
+    clustered,
     filteredNodes,
     filteredEdges,
     matchedNodeIds,
@@ -225,5 +389,6 @@ export const useTopologyStore = defineStore('topology', () => {
     clearSelection,
     reset,
     updateCenter,
+    toggleCluster,
   }
 })

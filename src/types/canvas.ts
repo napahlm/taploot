@@ -1,5 +1,11 @@
 import type { Host, Connection } from './network'
 
+export interface ClusterInfo {
+  subnet: string
+  hostCount: number
+  hostIds: number[]
+}
+
 export interface CanvasNode {
   host: Host
   x: number
@@ -10,6 +16,7 @@ export interface CanvasNode {
   color: string
   label: string
   pinned: boolean
+  cluster?: ClusterInfo
 }
 
 export interface CanvasEdge {

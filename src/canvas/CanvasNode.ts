@@ -12,6 +12,9 @@ export function createNodeGroup(
     onClick: (hostId: number) => void
   },
 ): Konva.Group {
+  const isCluster = !!node.cluster
+  const radius = isCluster ? node.radius : NODE_RADIUS
+
   const group = new Konva.Group({
     x: node.x,
     y: node.y,
@@ -20,13 +23,14 @@ export function createNodeGroup(
   })
 
   const circle = new Konva.Circle({
-    radius: NODE_RADIUS,
-    fill: '#252545',
+    radius,
+    fill: isCluster ? '#1e1b4b' : '#252545',
     stroke: node.color,
-    strokeWidth: 2,
+    strokeWidth: isCluster ? 3 : 2,
     shadowColor: node.color,
-    shadowBlur: 8,
+    shadowBlur: isCluster ? 12 : 8,
     shadowOpacity: 0.4,
+    dash: isCluster ? [6, 3] : undefined,
   })
 
   const label = new Konva.Text({
@@ -35,13 +39,26 @@ export function createNodeGroup(
     fontFamily: 'Segoe UI, system-ui, sans-serif',
     fill: '#e0e0e0',
     align: 'center',
-    y: LABEL_OFFSET,
+    y: radius + 6,
   })
-  // Center the label horizontally
   label.x(-label.width() / 2)
 
   group.add(circle)
   group.add(label)
+
+  if (isCluster) {
+    const countText = new Konva.Text({
+      text: String(node.cluster!.hostCount),
+      fontSize: 14,
+      fontFamily: 'Segoe UI, system-ui, sans-serif',
+      fontStyle: 'bold',
+      fill: '#c4b5fd',
+      align: 'center',
+    })
+    countText.x(-countText.width() / 2)
+    countText.y(-countText.height() / 2)
+    group.add(countText)
+  }
 
   group.on('dragmove', () => {
     callbacks.onDragMove(node.host.id, group.x(), group.y())

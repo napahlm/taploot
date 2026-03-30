@@ -44,10 +44,14 @@ function renderGraph() {
         topology.pinNode(hostId, x, y)
       },
       onDragEnd(hostId, x, y) {
-        saveNodePosition(hostId, x, y)
+        if (!node.cluster) saveNodePosition(hostId, x, y)
       },
       onClick(hostId) {
-        topology.selectNode(hostId === topology.selectedNodeId ? null : hostId)
+        if (node.cluster) {
+          topology.toggleCluster(node.cluster.subnet)
+        } else {
+          topology.selectNode(hostId === topology.selectedNodeId ? null : hostId)
+        }
       },
     })
     layer.add(group)
