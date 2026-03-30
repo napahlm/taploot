@@ -14,20 +14,6 @@ use crate::oui;
 use crate::protocols::modbus;
 use crate::TaplootError;
 
-/// Buffered packet row for batch insert
-struct PacketRow {
-    connection_id: i64,
-    timestamp: f64,
-    src_ip: String,
-    dst_ip: String,
-    src_port: u16,
-    dst_port: u16,
-    protocol: String,
-    length: i64,
-}
-
-const PACKET_BATCH_SIZE: usize = 5000;
-
 pub fn parse_pcap(
     path: &Path,
     db: &Arc<Mutex<rusqlite::Connection>>,
@@ -47,7 +33,6 @@ pub fn parse_pcap(
 
     let mut host_map: HashMap<String, i64> = HashMap::new();
     let mut conn_map: HashMap<String, i64> = HashMap::new();
-    let mut packet_buf: Vec<PacketRow> = Vec::with_capacity(PACKET_BATCH_SIZE);
     let mut packet_count: usize = 0;
     let mut min_ts: f64 = f64::MAX;
     let mut max_ts: f64 = f64::MIN;
@@ -63,23 +48,18 @@ pub fn parse_pcap(
     let result = if is_pcapng {
         parse_pcapng_data(
             &buf, &conn, &mut host_map, &mut conn_map,
-            &mut packet_buf, &mut packet_count, &mut min_ts, &mut max_ts,
+            &mut packet_count, &mut min_ts, &mut max_ts,
         )
     } else {
         parse_legacy_data(
             &buf, &conn, &mut host_map, &mut conn_map,
-            &mut packet_buf, &mut packet_count, &mut min_ts, &mut max_ts,
+            &mut packet_count, &mut min_ts, &mut max_ts,
         )
     };
 
     if let Err(e) = result {
         let _ = conn.execute_batch("ROLLBACK");
         return Err(e);
-    }
-
-    // Flush remaining buffered packets
-    if !packet_buf.is_empty() {
-        flush_packets(&conn, &packet_buf)?;
     }
 
     // Recreate indexes after all data is inserted
@@ -100,46 +80,12 @@ pub fn parse_pcap(
     })
 }
 
-/// Batch-insert buffered packets using a multi-value INSERT
-fn flush_packets(conn: &rusqlite::Connection, rows: &[PacketRow]) -> Result<(), TaplootError> {
-    if rows.is_empty() {
-        return Ok(());
-    }
-    // Build multi-value INSERT: INSERT INTO packets (...) VALUES (?,?,?,...), (?,?,?,...),...
-    let mut sql = String::from(
-        "INSERT INTO packets (connection_id, timestamp, src_ip, dst_ip, src_port, dst_port, protocol, length) VALUES ",
-    );
-    for (i, _) in rows.iter().enumerate() {
-        if i > 0 {
-            sql.push(',');
-        }
-        sql.push_str("(?,?,?,?,?,?,?,?)");
-    }
-
-    let mut stmt = conn.prepare_cached(&sql)?;
-    let mut idx = 1;
-    for row in rows {
-        stmt.raw_bind_parameter(idx, row.connection_id)?;
-        stmt.raw_bind_parameter(idx + 1, row.timestamp)?;
-        stmt.raw_bind_parameter(idx + 2, &row.src_ip)?;
-        stmt.raw_bind_parameter(idx + 3, &row.dst_ip)?;
-        stmt.raw_bind_parameter(idx + 4, i64::from(row.src_port))?;
-        stmt.raw_bind_parameter(idx + 5, i64::from(row.dst_port))?;
-        stmt.raw_bind_parameter(idx + 6, &row.protocol)?;
-        stmt.raw_bind_parameter(idx + 7, row.length)?;
-        idx += 8;
-    }
-    stmt.raw_execute()?;
-    Ok(())
-}
-
 #[allow(clippy::too_many_arguments)]
 fn parse_pcapng_data(
     data: &[u8],
     conn: &rusqlite::Connection,
     host_map: &mut HashMap<String, i64>,
     conn_map: &mut HashMap<String, i64>,
-    packet_buf: &mut Vec<PacketRow>,
     packet_count: &mut usize,
     min_ts: &mut f64,
     max_ts: &mut f64,
@@ -166,13 +112,13 @@ fn parse_pcapng_data(
                         let ts = epb.decode_ts_f64(ts_offset, resolution);
                         process_packet(
                             epb.data, ts, conn, host_map, conn_map,
-                            packet_buf, packet_count, min_ts, max_ts,
+                            packet_count, min_ts, max_ts,
                         )?;
                     }
                     PcapBlockOwned::NG(Block::SimplePacket(spb)) => {
                         process_packet(
                             spb.data, 0.0, conn, host_map, conn_map,
-                            packet_buf, packet_count, min_ts, max_ts,
+                            packet_count, min_ts, max_ts,
                         )?;
                     }
                     _ => {}
@@ -197,7 +143,6 @@ fn parse_legacy_data(
     conn: &rusqlite::Connection,
     host_map: &mut HashMap<String, i64>,
     conn_map: &mut HashMap<String, i64>,
-    packet_buf: &mut Vec<PacketRow>,
     packet_count: &mut usize,
     min_ts: &mut f64,
     max_ts: &mut f64,
@@ -212,7 +157,7 @@ fn parse_legacy_data(
                     let ts = f64::from(packet.ts_sec) + f64::from(packet.ts_usec) / 1_000_000.0;
                     process_packet(
                         packet.data, ts, conn, host_map, conn_map,
-                        packet_buf, packet_count, min_ts, max_ts,
+                        packet_count, min_ts, max_ts,
                     )?;
                 }
                 reader.consume(offset);
@@ -236,7 +181,6 @@ fn process_packet(
     conn: &rusqlite::Connection,
     host_map: &mut HashMap<String, i64>,
     conn_map: &mut HashMap<String, i64>,
-    packet_buf: &mut Vec<PacketRow>,
     packet_count: &mut usize,
     min_ts: &mut f64,
     max_ts: &mut f64,
@@ -329,22 +273,12 @@ fn process_packet(
         id
     };
 
-    // Buffer packet for batch insert
-    packet_buf.push(PacketRow {
-        connection_id: conn_id,
-        timestamp,
-        src_ip,
-        dst_ip,
-        src_port,
-        dst_port,
-        protocol,
-        length: data.len() as i64,
-    });
-
-    if packet_buf.len() >= PACKET_BATCH_SIZE {
-        flush_packets(conn, packet_buf)?;
-        packet_buf.clear();
-    }
+    // Insert packet using cached prepared statement
+    conn.prepare_cached(
+        "INSERT INTO packets (connection_id, timestamp, src_ip, dst_ip, src_port, dst_port, protocol, length)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+    )?
+    .execute(params![conn_id, timestamp, &src_ip, &dst_ip, src_port, dst_port, &protocol, data.len() as i64])?;
 
     *packet_count += 1;
     Ok(())

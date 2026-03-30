@@ -1,18 +1,13 @@
-use std::path::Path;
-
 use rusqlite::Connection;
 
 use crate::TaplootError;
 
-pub fn init_db(path: &Path) -> Result<Connection, TaplootError> {
-    let conn = Connection::open(path)?;
+pub fn init_db() -> Result<Connection, TaplootError> {
+    let conn = Connection::open_in_memory()?;
 
-    conn.execute_batch("PRAGMA journal_mode=WAL;")?;
-    conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
     conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
     conn.execute_batch("PRAGMA cache_size=-64000;")?; // 64MB cache
     conn.execute_batch("PRAGMA temp_store=MEMORY;")?;
-    conn.execute_batch("PRAGMA mmap_size=268435456;")?; // 256MB mmap
 
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS hosts (

@@ -20,9 +20,8 @@ pub struct ImportResult {
 #[tauri::command]
 pub fn import_pcap(path: String, state: State<'_, AppState>) -> Result<ImportResult, TaplootError> {
     let pcap_path = PathBuf::from(&path);
-    let db_path = pcap_path.with_extension("taploot.db");
 
-    let conn = schema::init_db(&db_path)?;
+    let conn = schema::init_db()?;
     let conn = Arc::new(Mutex::new(conn));
 
     let result = pcap::parse_pcap(&pcap_path, &conn)?;
