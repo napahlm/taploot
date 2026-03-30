@@ -1,0 +1,60 @@
+use std::path::Path;
+
+use rusqlite::Connection;
+
+use crate::TaplootError;
+
+pub fn init_db(path: &Path) -> Result<Connection, TaplootError> {
+    let conn = Connection::open(path)?;
+
+    conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+    conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS hosts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mac_address TEXT NOT NULL,
+            ip_address TEXT NOT NULL UNIQUE,
+            device_type TEXT NOT NULL DEFAULT 'unknown',
+            first_seen REAL NOT NULL,
+            last_seen REAL NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS connections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            src_host_id INTEGER NOT NULL REFERENCES hosts(id),
+            dst_host_id INTEGER NOT NULL REFERENCES hosts(id),
+            src_port INTEGER NOT NULL,
+            dst_port INTEGER NOT NULL,
+            protocol TEXT NOT NULL,
+            app_protocol TEXT,
+            packet_count INTEGER NOT NULL DEFAULT 1,
+            byte_count INTEGER NOT NULL DEFAULT 0,
+            first_seen REAL NOT NULL,
+            last_seen REAL NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS packets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            connection_id INTEGER NOT NULL REFERENCES connections(id),
+            timestamp REAL NOT NULL,
+            src_ip TEXT NOT NULL,
+            dst_ip TEXT NOT NULL,
+            src_port INTEGER NOT NULL,
+            dst_port INTEGER NOT NULL,
+            protocol TEXT NOT NULL,
+            length INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS node_positions (
+            host_id INTEGER PRIMARY KEY REFERENCES hosts(id),
+            x REAL NOT NULL,
+            y REAL NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_packets_timestamp ON packets(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_packets_connection ON packets(connection_id);",
+    )?;
+
+    Ok(conn)
+}
