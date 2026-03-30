@@ -58,7 +58,7 @@ export function createNodeGroup(
   return group
 }
 
-export function updateNodeGroup(group: Konva.Group, node: CanvasNode, selected: boolean) {
+export function updateNodeGroup(group: Konva.Group, node: CanvasNode, selected: boolean, searchState?: 'match' | 'dim' | 'none') {
   group.x(node.x)
   group.y(node.y)
 
@@ -66,6 +66,20 @@ export function updateNodeGroup(group: Konva.Group, node: CanvasNode, selected: 
   if (circle) {
     circle.stroke(selected ? '#ffffff' : node.color)
     circle.strokeWidth(selected ? 3 : 2)
-    circle.shadowBlur(selected ? 14 : 8)
+
+    if (searchState === 'match') {
+      circle.shadowBlur(20)
+      circle.shadowColor('#39ff14')
+      circle.shadowOpacity(0.8)
+      group.opacity(1)
+    } else if (searchState === 'dim') {
+      circle.shadowBlur(0)
+      group.opacity(0.2)
+    } else {
+      circle.shadowBlur(selected ? 14 : 8)
+      circle.shadowColor(node.color)
+      circle.shadowOpacity(0.4)
+      group.opacity(1)
+    }
   }
 }

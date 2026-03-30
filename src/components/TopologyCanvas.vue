@@ -28,7 +28,11 @@ function renderGraph() {
 
   // Edges first (below nodes)
   for (const edge of topology.filteredEdges) {
-    const line = createEdgeLine(edge)
+    const line = createEdgeLine(edge, {
+      onClick(connectionId) {
+        topology.selectEdge(connectionId === topology.selectedEdgeId ? null : connectionId)
+      },
+    })
     layer.add(line)
     edgeLines.set(edge.connection.id, line)
   }
@@ -54,17 +58,24 @@ function renderGraph() {
 }
 
 function updatePositions() {
+  const searching = topology.searchQuery.trim().length > 0
+  const matched = topology.matchedNodeIds
+
   for (const node of topology.filteredNodes) {
     const group = nodeGroups.get(node.host.id)
     if (group) {
-      updateNodeGroup(group, node, node.host.id === topology.selectedNodeId)
+      let searchState: 'match' | 'dim' | 'none' = 'none'
+      if (searching) {
+        searchState = matched.has(node.host.id) ? 'match' : 'dim'
+      }
+      updateNodeGroup(group, node, node.host.id === topology.selectedNodeId, searchState)
     }
   }
 
   for (const edge of topology.filteredEdges) {
     const line = edgeLines.get(edge.connection.id)
     if (line) {
-      updateEdgeLine(line, edge)
+      updateEdgeLine(line, edge, edge.connection.id === topology.selectedEdgeId)
     }
   }
 
@@ -89,6 +100,16 @@ topology.setOnTick(() => updatePositions())
 // Update selection styling
 watch(
   () => topology.selectedNodeId,
+  () => updatePositions(),
+)
+
+watch(
+  () => topology.selectedEdgeId,
+  () => updatePositions(),
+)
+
+watch(
+  () => topology.searchQuery,
   () => updatePositions(),
 )
 </script>

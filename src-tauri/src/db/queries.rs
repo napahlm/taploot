@@ -1,6 +1,6 @@
 use rusqlite::{params, Connection};
 
-use crate::commands::query::{Connection as NetConnection, Host};
+use crate::commands::query::{Connection as NetConnection, Host, HostConnection, HostDetail, Packet};
 use crate::TaplootError;
 
 pub fn insert_host(
@@ -31,6 +31,18 @@ pub fn update_host_timestamp(
             last_seen = MAX(last_seen, ?1)
          WHERE id = ?2",
         params![timestamp, id],
+    )?;
+    Ok(())
+}
+
+pub fn update_host_device_type(
+    conn: &Connection,
+    id: i64,
+    device_type: &str,
+) -> Result<(), TaplootError> {
+    conn.execute(
+        "UPDATE hosts SET device_type = ?1 WHERE id = ?2 AND device_type = 'unknown'",
+        params![device_type, id],
     )?;
     Ok(())
 }
@@ -180,4 +192,94 @@ pub fn save_node_position(
         params![host_id, x, y],
     )?;
     Ok(())
+}
+
+pub fn get_host_detail(conn: &Connection, host_id: i64) -> Result<HostDetail, TaplootError> {
+    let host = conn.query_row(
+        "SELECT id, mac_address, ip_address, device_type, first_seen, last_seen
+         FROM hosts WHERE id = ?1",
+        params![host_id],
+        |row| {
+            Ok(Host {
+                id: row.get(0)?,
+                mac_address: row.get(1)?,
+                ip_address: row.get(2)?,
+                device_type: row.get(3)?,
+                first_seen: row.get(4)?,
+                last_seen: row.get(5)?,
+            })
+        },
+    )?;
+
+    let mut stmt = conn.prepare(
+        "SELECT c.id, h.ip_address, h.mac_address,
+                CASE WHEN c.src_host_id = ?1 THEN 'outbound' ELSE 'inbound' END,
+                c.src_port, c.dst_port, c.protocol, c.app_protocol,
+                c.packet_count, c.byte_count, c.first_seen, c.last_seen
+         FROM connections c
+         JOIN hosts h ON h.id = CASE WHEN c.src_host_id = ?1 THEN c.dst_host_id ELSE c.src_host_id END
+         WHERE c.src_host_id = ?1 OR c.dst_host_id = ?1
+         ORDER BY c.packet_count DESC",
+    )?;
+    let connections: Vec<HostConnection> = stmt
+        .query_map(params![host_id], |row| {
+            Ok(HostConnection {
+                connection_id: row.get(0)?,
+                peer_ip: row.get(1)?,
+                peer_mac: row.get(2)?,
+                direction: row.get(3)?,
+                src_port: row.get(4)?,
+                dst_port: row.get(5)?,
+                protocol: row.get(6)?,
+                app_protocol: row.get(7)?,
+                packet_count: row.get(8)?,
+                byte_count: row.get(9)?,
+                first_seen: row.get(10)?,
+                last_seen: row.get(11)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let (total_packets, total_bytes) = conn.query_row(
+        "SELECT COALESCE(SUM(packet_count), 0), COALESCE(SUM(byte_count), 0)
+         FROM connections WHERE src_host_id = ?1 OR dst_host_id = ?1",
+        params![host_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+
+    Ok(HostDetail {
+        host,
+        connections,
+        total_packets,
+        total_bytes,
+    })
+}
+
+pub fn get_connection_packets(
+    conn: &Connection,
+    connection_id: i64,
+    limit: i64,
+) -> Result<Vec<Packet>, TaplootError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, timestamp, src_ip, dst_ip, src_port, dst_port, protocol, length
+         FROM packets
+         WHERE connection_id = ?1
+         ORDER BY timestamp ASC
+         LIMIT ?2",
+    )?;
+    let packets: Vec<Packet> = stmt
+        .query_map(params![connection_id, limit], |row| {
+            Ok(Packet {
+                id: row.get(0)?,
+                timestamp: row.get(1)?,
+                src_ip: row.get(2)?,
+                dst_ip: row.get(3)?,
+                src_port: row.get(4)?,
+                dst_port: row.get(5)?,
+                protocol: row.get(6)?,
+                length: row.get(7)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(packets)
 }

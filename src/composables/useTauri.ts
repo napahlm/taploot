@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { Host, Connection, ImportResult } from '@/types/network'
+import type { Host, Connection, ImportResult, HostDetail, Packet } from '@/types/network'
 
 export function useTauri() {
   async function importPcap(path: string): Promise<ImportResult> {
@@ -22,5 +22,21 @@ export function useTauri() {
     return invoke<void>('save_node_position', { hostId, x, y })
   }
 
-  return { importPcap, getHosts, getConnections, getTimeRange, saveNodePosition }
+  async function getHostDetail(hostId: number): Promise<HostDetail> {
+    return invoke<HostDetail>('get_host_detail', { hostId })
+  }
+
+  async function getConnectionPackets(connectionId: number, limit: number): Promise<Packet[]> {
+    return invoke<Packet[]>('get_connection_packets', { connectionId, limit })
+  }
+
+  return {
+    importPcap,
+    getHosts,
+    getConnections,
+    getTimeRange,
+    saveNodePosition,
+    getHostDetail,
+    getConnectionPackets,
+  }
 }

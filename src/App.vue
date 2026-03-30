@@ -1,11 +1,26 @@
 <script setup lang="ts">
+import { onMounted, onUnmounted } from 'vue'
 import { useAppStore } from '@/stores/app'
+import { useTopologyStore } from '@/stores/topology'
 import FileDropZone from '@/components/FileDropZone.vue'
 import AppHeader from '@/components/AppHeader.vue'
 import TopologyCanvas from '@/components/TopologyCanvas.vue'
 import TimelineBar from '@/components/TimelineBar.vue'
+import NodeDetailPanel from '@/components/NodeDetailPanel.vue'
+import EdgeDetailPanel from '@/components/EdgeDetailPanel.vue'
+import SearchBar from '@/components/SearchBar.vue'
 
 const appStore = useAppStore()
+const topology = useTopologyStore()
+
+function onKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape') {
+    topology.clearSelection()
+  }
+}
+
+onMounted(() => window.addEventListener('keydown', onKeydown))
+onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 </script>
 
 <template>
@@ -14,8 +29,11 @@ const appStore = useAppStore()
       <AppHeader />
       <div class="flex flex-1 overflow-hidden">
         <TopologyCanvas />
+        <NodeDetailPanel v-if="topology.selectedNodeId !== null" />
+        <EdgeDetailPanel v-if="topology.selectedEdgeId !== null" />
       </div>
       <TimelineBar />
+      <SearchBar />
     </template>
     <FileDropZone v-else />
   </div>

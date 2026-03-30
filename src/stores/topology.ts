@@ -42,6 +42,8 @@ export const useTopologyStore = defineStore('topology', () => {
   const nodes = ref<CanvasNode[]>([])
   const edges = ref<CanvasEdge[]>([])
   const selectedNodeId = ref<number | null>(null)
+  const selectedEdgeId = ref<number | null>(null)
+  const searchQuery = ref('')
   const layout = ref<LayoutConfig>({ ...DEFAULT_LAYOUT })
   let simulation: Simulation<SimNode, undefined> | null = null
   let onTickCallback: (() => void) | null = null
@@ -62,6 +64,32 @@ export const useTopologyStore = defineStore('topology', () => {
       activeHostIds.add(edge.target.host.id)
     }
     return nodes.value.filter((n) => activeHostIds.has(n.host.id))
+  })
+
+  const matchedNodeIds = computed<Set<number>>(() => {
+    const q = searchQuery.value.trim().toLowerCase()
+    if (!q) return new Set()
+    const matched = new Set<number>()
+    for (const node of nodes.value) {
+      const h = node.host
+      if (
+        h.ip_address.toLowerCase().includes(q) ||
+        h.mac_address.toLowerCase().includes(q) ||
+        h.device_type.toLowerCase().includes(q)
+      ) {
+        matched.add(h.id)
+      }
+    }
+    // Also match edges by protocol
+    for (const edge of edges.value) {
+      const c = edge.connection
+      const proto = (c.app_protocol ?? c.protocol).toLowerCase()
+      if (proto.includes(q)) {
+        matched.add(c.src_host_id)
+        matched.add(c.dst_host_id)
+      }
+    }
+    return matched
   })
 
   function buildGraph(hosts: Host[], connections: Connection[]) {
@@ -146,6 +174,17 @@ export const useTopologyStore = defineStore('topology', () => {
 
   function selectNode(hostId: number | null) {
     selectedNodeId.value = hostId
+    if (hostId !== null) selectedEdgeId.value = null
+  }
+
+  function selectEdge(edgeId: number | null) {
+    selectedEdgeId.value = edgeId
+    if (edgeId !== null) selectedNodeId.value = null
+  }
+
+  function clearSelection() {
+    selectedNodeId.value = null
+    selectedEdgeId.value = null
   }
 
   function reset() {
@@ -154,6 +193,7 @@ export const useTopologyStore = defineStore('topology', () => {
     nodes.value = []
     edges.value = []
     selectedNodeId.value = null
+    selectedEdgeId.value = null
     onTickCallback = null
   }
 
@@ -170,14 +210,19 @@ export const useTopologyStore = defineStore('topology', () => {
     nodes,
     edges,
     selectedNodeId,
+    selectedEdgeId,
+    searchQuery,
     layout,
     filteredNodes,
     filteredEdges,
+    matchedNodeIds,
     buildGraph,
     setOnTick,
     pinNode,
     unpinNode,
     selectNode,
+    selectEdge,
+    clearSelection,
     reset,
     updateCenter,
   }

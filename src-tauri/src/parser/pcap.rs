@@ -9,6 +9,7 @@ use pcap_parser::*;
 
 use crate::commands::import::ImportResult;
 use crate::db::queries;
+use crate::oui;
 use crate::protocols::modbus;
 use crate::TaplootError;
 
@@ -300,6 +301,9 @@ fn upsert_host(
         return Ok(id);
     }
     let id = queries::insert_host(conn, mac, ip, timestamp)?;
+    if let Some(vendor) = oui::lookup_vendor(mac) {
+        queries::update_host_device_type(conn, id, vendor)?;
+    }
     host_map.insert(ip.to_string(), id);
     Ok(id)
 }
