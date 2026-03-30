@@ -45,6 +45,32 @@ function getSubnet(ip: string): string {
   return parts.length === 4 ? `${parts[0]}.${parts[1]}.${parts[2]}` : ip
 }
 
+function pairKey(a: number, b: number): string {
+  return a < b ? `${a}-${b}` : `${b}-${a}`
+}
+
+const CURVE_SPACING = 30
+
+function assignCurveOffsets(edgeList: CanvasEdge[]): void {
+  const groups = new Map<string, CanvasEdge[]>()
+  for (const e of edgeList) {
+    const key = pairKey(e.source.host.id, e.target.host.id)
+    let arr = groups.get(key)
+    if (!arr) { arr = []; groups.set(key, arr) }
+    arr.push(e)
+  }
+  for (const group of groups.values()) {
+    if (group.length === 1) {
+      group[0].curveOffset = 0
+      continue
+    }
+    const n = group.length
+    for (let i = 0; i < n; i++) {
+      group[i].curveOffset = (i - (n - 1) / 2) * CURVE_SPACING
+    }
+  }
+}
+
 export const useTopologyStore = defineStore('topology', () => {
   const nodes = shallowRef<CanvasNode[]>([])
   const edges = shallowRef<CanvasEdge[]>([])
@@ -54,6 +80,8 @@ export const useTopologyStore = defineStore('topology', () => {
   const layout = ref<LayoutConfig>({ ...DEFAULT_LAYOUT })
   const expandedSubnets = ref(new Set<string>())
   const clustered = ref(false)
+  const trafficMin = ref(0)
+  const trafficMax = ref(Infinity)
 
   let simulation: Simulation<SimNode, undefined> | null = null
   let onTickCallback: (() => void) | null = null
@@ -63,9 +91,18 @@ export const useTopologyStore = defineStore('topology', () => {
   const timelineStore = useTimelineStore()
 
   const filteredEdges = computed(() => {
-    if (!timelineStore.filtering) return edges.value
-    const { start, end } = timelineStore.filterRange
-    return edges.value.filter((e) => e.connection.last_seen >= start && e.connection.first_seen <= end)
+    let result = edges.value
+    if (timelineStore.filtering) {
+      const { start, end } = timelineStore.filterRange
+      result = result.filter((e) => e.connection.last_seen >= start && e.connection.first_seen <= end)
+    }
+    if (trafficMin.value > 0 || trafficMax.value < Infinity) {
+      result = result.filter((e) => {
+        const pc = e.connection.packet_count
+        return pc >= trafficMin.value && pc <= trafficMax.value
+      })
+    }
+    return result
   })
 
   const filteredNodes = computed(() => {
@@ -103,10 +140,29 @@ export const useTopologyStore = defineStore('topology', () => {
     return matched
   })
 
+  const packetCountRange = computed(() => {
+    if (edges.value.length === 0) return { min: 0, max: 0 }
+    let lo = Infinity
+    let hi = 0
+    for (const e of edges.value) {
+      const pc = e.connection.packet_count
+      if (pc < lo) lo = pc
+      if (pc > hi) hi = pc
+    }
+    return { min: lo, max: hi }
+  })
+
+  function setTrafficFilter(min: number, max: number) {
+    trafficMin.value = min
+    trafficMax.value = max
+  }
+
   function buildGraph(hosts: Host[], connections: Connection[]) {
     rawHosts = hosts
     rawConnections = connections
     expandedSubnets.value.clear()
+    trafficMin.value = 0
+    trafficMax.value = Infinity
 
     if (hosts.length > CLUSTER_THRESHOLD) {
       clustered.value = true
@@ -144,8 +200,10 @@ export const useTopologyStore = defineStore('topology', () => {
         target: nodeMap.get(conn.dst_host_id)!,
         color: edgeColor(conn),
         width: edgeWidth(conn),
+        curveOffset: 0,
       }))
 
+    assignCurveOffsets(edges.value)
     runSimulation()
   }
 
@@ -224,6 +282,7 @@ export const useTopologyStore = defineStore('topology', () => {
           target: nodeMap.get(dstId)!,
           color: edgeColor(conn),
           width: edgeWidth(conn),
+          curveOffset: 0,
         })
       } else {
         // At least one endpoint is a cluster — aggregate
@@ -261,10 +320,12 @@ export const useTopologyStore = defineStore('topology', () => {
         target: nodeMap.get(agg.dst)!,
         color: edgeColor(synConn),
         width: edgeWidth(synConn),
+        curveOffset: 0,
       })
     }
 
     edges.value = newEdges
+    assignCurveOffsets(edges.value)
     runSimulation()
   }
 
@@ -355,6 +416,8 @@ export const useTopologyStore = defineStore('topology', () => {
     searchQuery.value = ''
     expandedSubnets.value.clear()
     clustered.value = false
+    trafficMin.value = 0
+    trafficMax.value = Infinity
     rawHosts = []
     rawConnections = []
     onTickCallback = null
@@ -380,6 +443,9 @@ export const useTopologyStore = defineStore('topology', () => {
     filteredNodes,
     filteredEdges,
     matchedNodeIds,
+    packetCountRange,
+    trafficMin,
+    trafficMax,
     buildGraph,
     setOnTick,
     pinNode,
@@ -387,6 +453,7 @@ export const useTopologyStore = defineStore('topology', () => {
     selectNode,
     selectEdge,
     clearSelection,
+    setTrafficFilter,
     reset,
     updateCenter,
     toggleCluster,

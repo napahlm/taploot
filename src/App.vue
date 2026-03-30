@@ -9,6 +9,7 @@ import TimelineBar from '@/components/TimelineBar.vue'
 import NodeDetailPanel from '@/components/NodeDetailPanel.vue'
 import EdgeDetailPanel from '@/components/EdgeDetailPanel.vue'
 import SearchBar from '@/components/SearchBar.vue'
+import EdgeFilterBar from '@/components/EdgeFilterBar.vue'
 
 const appStore = useAppStore()
 const topology = useTopologyStore()
@@ -27,10 +28,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   <div class="flex h-screen w-screen flex-col bg-bg-primary">
     <template v-if="appStore.loadedFile">
       <AppHeader />
-      <div class="flex flex-1 overflow-hidden">
+      <div class="relative flex flex-1 overflow-hidden">
         <TopologyCanvas />
         <NodeDetailPanel v-if="topology.selectedNodeId !== null" />
         <EdgeDetailPanel v-if="topology.selectedEdgeId !== null" />
+        <div class="absolute bottom-2 left-2 z-10">
+          <EdgeFilterBar />
+        </div>
       </div>
       <TimelineBar />
       <SearchBar />

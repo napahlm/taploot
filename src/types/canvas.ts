@@ -25,6 +25,7 @@ export interface CanvasEdge {
   target: CanvasNode
   color: string
   width: number
+  curveOffset: number // 0 = straight, nonzero = perpendicular offset for parallel edges
 }
 
 export interface LayoutConfig {
