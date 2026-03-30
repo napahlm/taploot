@@ -3,6 +3,7 @@ import { useAppStore } from '@/stores/app'
 import FileDropZone from '@/components/FileDropZone.vue'
 import AppHeader from '@/components/AppHeader.vue'
 import TopologyCanvas from '@/components/TopologyCanvas.vue'
+import TimelineBar from '@/components/TimelineBar.vue'
 
 const appStore = useAppStore()
 </script>
@@ -14,6 +15,7 @@ const appStore = useAppStore()
       <div class="flex flex-1 overflow-hidden">
         <TopologyCanvas />
       </div>
+      <TimelineBar />
     </template>
     <FileDropZone v-else />
   </div>
